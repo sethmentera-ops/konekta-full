@@ -33,7 +33,6 @@ export const MenuView: React.FC = () => {
     isSimulatedOffline,
     toggleSimulateOffline,
     setShowLogoutModal,
-    setShowInstallModal,
     setShowPagesModal,
     setShowGroupsModal,
     setShowLanguageModal,
@@ -145,31 +144,6 @@ export const MenuView: React.FC = () => {
           </div>
           <ChevronRight className="w-4 h-4 text-gray-400" />
         </div>
-
-        {/* Install App on Phone Button */}
-        <div
-          onClick={() => setShowInstallModal(true)}
-          className="p-3.5 flex items-center justify-between cursor-pointer hover:bg-blue-50 dark:hover:bg-blue-950/40 transition-colors bg-gradient-to-r from-blue-50/50 to-indigo-50/50 dark:from-blue-950/20 dark:to-indigo-950/20"
-        >
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-full bg-emerald-500 text-white flex items-center justify-center shadow-xs">
-              <ArrowDownToLine className="w-4 h-4" />
-            </div>
-            <div>
-              <h4 className="font-bold text-xs text-blue-700 dark:text-blue-300 flex items-center gap-1.5">
-                <span>{t('installApp')}</span>
-                <span className="text-[9px] bg-emerald-600 text-white font-extrabold px-1.5 py-0.2 rounded-full">
-                  APK
-                </span>
-              </h4>
-              <p className="text-[11px] text-gray-500 dark:text-gray-400">
-                {t('installAppDesc')}
-              </p>
-            </div>
-          </div>
-          <ChevronRight className="w-4 h-4 text-gray-400" />
-        </div>
-      </div>
 
       {/* Preferences & Settings */}
       <div className="bg-white dark:bg-gray-900 border sm:rounded-xl border-gray-200 dark:border-gray-800 divide-y divide-gray-100 dark:divide-gray-800 mb-3 overflow-hidden shadow-2xs">

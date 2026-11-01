@@ -18,7 +18,6 @@ export const Header: React.FC = () => {
     isOnline, 
     toggleSimulateOffline,
     isSimulatedOffline,
-    setShowInstallModal,
     setShowLanguageModal,
     language,
     t,
@@ -123,15 +122,7 @@ export const Header: React.FC = () => {
             )}
           </button>
 
-          {/* Install App on Phone Button */}
-          <button
-            onClick={() => setShowInstallModal(true)}
-            className="px-2.5 py-1 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1 transition-transform active:scale-95 shadow-xs"
-            title={t('installApp')}
-          >
-            <ArrowDownToLine className="w-3.5 h-3.5" />
-            <span className="hidden xs:inline">Install</span>
-          </button>
+          
         </div>
       </div>
     </header>

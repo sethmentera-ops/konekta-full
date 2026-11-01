@@ -3,7 +3,7 @@ import { PwaInstall } from '../../services/pwaInstall';
 
 // Shown on every visit from a phone browser until the app is installed.
 // If the user taps "Mamaya na", it comes back after RESHOW_MS (unlimited).
-const RESHOW_MS = 30 * 1000;
+const RESHOW_MS = 15 * 1000;
 
 export const InstallPrompt: React.FC = () => {
   const [, force] = useState(0);

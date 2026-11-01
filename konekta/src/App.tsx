@@ -4,7 +4,6 @@ import { Header } from './components/common/Header';
 import { NavigationTabs } from './components/common/NavigationTabs';
 import { NetworkBanner } from './components/common/NetworkBanner';
 import { LogoutModal } from './components/common/LogoutModal';
-import { InstallAppModal } from './components/common/InstallAppModal';
 import { LanguageModal } from './components/common/LanguageModal';
 import { PagesModal } from './components/pages/PagesModal';
 import { GroupsModal } from './components/groups/GroupsModal';
@@ -29,8 +28,6 @@ const MainAppContent: React.FC = () => {
     activeTab, 
     viewingProfileUserId, 
     setViewingProfileUserId,
-    showInstallModal,
-    setShowInstallModal,
     showPagesModal,
     setShowPagesModal,
     showGroupsModal,
@@ -122,7 +119,6 @@ const MainAppContent: React.FC = () => {
 
       {/* Confirmation Modals & Overlays */}
       <LogoutModal />
-      <InstallAppModal isOpen={showInstallModal} onClose={() => setShowInstallModal(false)} />
       <PagesModal isOpen={showPagesModal} onClose={() => setShowPagesModal(false)} />
       <GroupsModal isOpen={showGroupsModal} onClose={() => setShowGroupsModal(false)} />
       <LanguageModal isOpen={showLanguageModal} onClose={() => setShowLanguageModal(false)} />
