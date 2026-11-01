@@ -11,10 +11,11 @@ async function post(url: string, body: object): Promise<OtpResult> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(25000),
     });
     return await r.json();
   } catch {
-    return { ok: false, error: 'Walang koneksyon sa server. Subukan ulit.' };
+    return { ok: false, error: 'Walang sagot ang server. Subukan ulit mamaya.' };
   }
 }
 

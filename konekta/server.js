@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 3001;
 app.use(express.json({ limit: '10kb' }));
 
 // ---------------------------------------------------------------------------
-// OTP / PIN verification (email via Gmail, SMS via Semaphore)
+// OTP / PIN verification (email via Brevo or Gmail, SMS via Semaphore)
 // ---------------------------------------------------------------------------
 const OTP_TTL_MS = 10 * 60 * 1000;      // PIN valid for 10 minutes
 const OTP_RESEND_MS = 60 * 1000;        // wait 60s before resending
@@ -22,11 +22,13 @@ const otpStore = new Map();             // key -> { hash, expires, attempts, las
 
 const GMAIL_USER = process.env.GMAIL_USER;
 const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD;
+const BREVO_API_KEY = process.env.BREVO_API_KEY;
+const BREVO_SENDER_EMAIL = process.env.BREVO_SENDER_EMAIL; // must be a verified sender in Brevo
 const SEMAPHORE_API_KEY = process.env.SEMAPHORE_API_KEY;
 const SEMAPHORE_SENDER = process.env.SEMAPHORE_SENDER_NAME; // optional
 
 const mailer = GMAIL_USER && GMAIL_APP_PASSWORD
-  ? nodemailer.createTransport({ service: 'gmail', auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD } })
+  ? nodemailer.createTransport({ service: 'gmail', auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD }, connectionTimeout: 10000, greetingTimeout: 10000, socketTimeout: 15000 })
   : null;
 
 const hashCode = (key, code) =>
@@ -64,7 +66,21 @@ app.post('/api/otp/send', async (req, res) => {
 
   try {
     if (id.type === 'email') {
-      if (mailer) {
+      if (BREVO_API_KEY && BREVO_SENDER_EMAIL) {
+        const r = await fetch('https://api.brevo.com/v3/smtp/email', {
+          signal: AbortSignal.timeout(15000),
+          method: 'POST',
+          headers: { 'api-key': BREVO_API_KEY, 'content-type': 'application/json', accept: 'application/json' },
+          body: JSON.stringify({
+            sender: { name: 'Konekta', email: BREVO_SENDER_EMAIL },
+            to: [{ email: id.key }],
+            subject: `Konekta PIN code: ${code}`,
+            textContent: message,
+            htmlContent: `<div style="font-family:sans-serif"><h2 style="color:#2563eb">Konekta</h2><p>Ang iyong PIN code:</p><p style="font-size:32px;letter-spacing:8px;font-weight:bold">${code}</p><p>Valid sa loob ng 10 minuto. Huwag ibahagi sa iba.</p></div>`,
+          }),
+        });
+        if (!r.ok) throw new Error(`Brevo ${r.status} ${await r.text()}`);
+      } else if (mailer) {
         await mailer.sendMail({
           from: `Konekta <${GMAIL_USER}>`,
           to: id.key,
@@ -81,7 +97,7 @@ app.post('/api/otp/send', async (req, res) => {
       if (SEMAPHORE_API_KEY) {
         const body = new URLSearchParams({ apikey: SEMAPHORE_API_KEY, number: id.key, message });
         if (SEMAPHORE_SENDER) body.set('sendername', SEMAPHORE_SENDER);
-        const r = await fetch('https://api.semaphore.co/api/v4/messages', { method: 'POST', body });
+        const r = await fetch('https://api.semaphore.co/api/v4/messages', { method: 'POST', body, signal: AbortSignal.timeout(15000) });
         if (!r.ok) throw new Error(`Semaphore ${r.status}`);
       } else if (process.env.NODE_ENV !== 'production') {
         console.log(`[DEV] SMS PIN para kay ${id.key}: ${code}`);
