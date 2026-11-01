@@ -26,7 +26,11 @@ export const InstallPrompt: React.FC = () => {
 
   if (!visible || !eligible()) return null;
 
-  const onInstall = async () => {
+    const onInstall = async () => {
+    if (showSteps) {
+      later();
+      return;
+    }
     if (PwaInstall.canPrompt()) {
       const ok = await PwaInstall.prompt();
       if (ok) setVisible(false);
