@@ -101,7 +101,7 @@ export const MenuView: React.FC = () => {
         </div>
       </div>
 
-      {/* Pages, Groups, and Install App Section */}
+      {/* Pages and Groups Section */}
       <div className="bg-white dark:bg-gray-900 border sm:rounded-xl border-gray-200 dark:border-gray-800 divide-y divide-gray-100 dark:divide-gray-800 mb-3 overflow-hidden shadow-2xs">
         {/* Pages */}
         <div
@@ -144,6 +144,7 @@ export const MenuView: React.FC = () => {
           </div>
           <ChevronRight className="w-4 h-4 text-gray-400" />
         </div>
+      </div>
 
       {/* Preferences & Settings */}
       <div className="bg-white dark:bg-gray-900 border sm:rounded-xl border-gray-200 dark:border-gray-800 divide-y divide-gray-100 dark:divide-gray-800 mb-3 overflow-hidden shadow-2xs">
