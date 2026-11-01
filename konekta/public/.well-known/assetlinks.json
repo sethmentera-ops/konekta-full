@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "ph.konekta.lite",
+      "sha256_cert_fingerprints": [
+        "14:6D:E9:7F:0E:52:D7:11:23:63:B0:E8:12:4C:32:56:0F:F0:9F:4B:B3:8E:27:46:83:3D:79:F9:2C:CD:B9:40"
+      ]
+    }
+  }
+]
