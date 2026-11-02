@@ -94,6 +94,13 @@ export const Api = {
     call<{ friends: string[]; sent: string[]; received: string[] }>('/api/friends', { token }),
   friendAction: (token: string, action: 'request' | 'cancel' | 'accept' | 'unfriend', body: object) =>
     call(`/api/friends/${action}`, { method: 'POST', token, body }),
+  feed: (token: string, since?: string) =>
+    call<{ posts: any[]; cursor: string | null }>(`/api/feed${since ? `?since=${encodeURIComponent(since)}` : ''}`, { token }),
+  stories: (token: string) => call<{ stories: any[] }>('/api/stories', { token }),
+  messages: (token: string, since?: string) =>
+    call<{ messages: any[]; cursor: string | null }>(`/api/messages${since ? `?since=${encodeURIComponent(since)}` : ''}`, { token }),
+  notifications: (token: string) => call<{ notifications: any[] }>('/api/notifications', { token }),
+  post: (token: string, path: string, body: object = {}) => call(path, { method: 'POST', token, body }),
   updateMe: (token: string, fields: object) =>
     call<{ user: User }>('/api/me', { method: 'PUT', token, body: fields }),
 };

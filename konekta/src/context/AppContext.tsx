@@ -81,6 +81,9 @@ interface AppContextType {
   getFriendshipStatus: (targetUserId: string) => 'self' | 'friends' | 'requested' | 'received' | 'none';
   openUserChat: (targetUserId: string) => void;
   openUserProfile: (targetUserId: string) => void;
+  dataVersion: number;
+  sendMessageToServer: (partnerId: string, msg: { id: string; text: string; imageUrl?: string }) => void;
+  markConversationRead: (partnerId: string) => void;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -114,6 +117,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isSearchOpen, setIsSearchOpen] = useState<boolean>(false);
   const [friendshipsVersion, setFriendshipsVersion] = useState<number>(0);
+  const [dataVersion, setDataVersion] = useState<number>(0);
 
   const isOnline = isBrowserOnline && !isSimulatedOffline;
 
@@ -321,24 +325,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
 
     setPosts(StorageService.getPosts());
+    serverDo(token => Api.post(token, '/api/posts', {
+      id: newPost.id, content, imageUrl, backgroundColor, feeling, location, privacy: 'public'
+    }));
     return newPost;
   };
 
   const deletePost = (postId: string) => {
     StorageService.deletePost(postId);
     setPosts(StorageService.getPosts());
+    serverDo(token => Api.post(token, `/api/posts/${encodeURIComponent(postId)}/delete`));
   };
 
   const toggleReaction = (postId: string, reaction: ReactionType) => {
     if (!currentUser) return;
     StorageService.toggleReaction(postId, currentUser.id, reaction);
     setPosts(StorageService.getPosts());
+    serverDo(token => Api.post(token, `/api/posts/${encodeURIComponent(postId)}/react`, { type: reaction }));
   };
 
   const addComment = (postId: string, text: string) => {
     if (!currentUser) return null;
     const comment = StorageService.addComment(postId, currentUser, text);
     setPosts(StorageService.getPosts());
+    if (comment) serverDo(token => Api.post(token, `/api/posts/${encodeURIComponent(postId)}/comment`, { id: comment.id, text }));
     return comment;
   };
 
@@ -346,6 +356,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!currentUser) throw new Error('Dapat munang mag-login');
     const newStory = StorageService.addStory(currentUser, mediaUrl, caption);
     setStories(StorageService.getStories());
+    serverDo(token => Api.post(token, '/api/stories', { id: newStory.id, mediaUrl, caption }));
     return newStory;
   };
 
@@ -353,6 +364,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (currentUser) {
       StorageService.markAllNotificationsRead(currentUser.id);
       setNotifications(prev => prev.map(n => ({ ...n, isRead: true })));
+      serverDo(token => Api.post(token, '/api/notifications/read'));
     }
   };
 
@@ -393,6 +405,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setCurrentUser(fresh);
         }
         setFriendshipsVersion(v => v + 1);
+        setPosts(StorageService.getPosts());
+        setStories(StorageService.getStories());
+        setNotifications(StorageService.getNotifications(currentUser.id));
+        setDataVersion(v => v + 1);
       }
     } finally {
       syncingRef.current = false;
@@ -400,12 +416,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Sends a friend action to the server, then pulls the real state back
-  const serverFriend = async (action: 'request' | 'cancel' | 'accept' | 'unfriend', body: object) => {
+  const serverDo = async (fn: (token: string) => Promise<unknown>) => {
     const token = Sessions.tokenFor(currentUser?.id);
     if (!token) return;
-    await Api.friendAction(token, action, body);
+    try {
+      await fn(token);
+    } catch (e) {
+      console.warn('server call failed', e);
+    }
     while (syncingRef.current) await new Promise(r => setTimeout(r, 100));
     runSync();
+  };
+
+  const serverFriend = (action: 'request' | 'cancel' | 'accept' | 'unfriend', body: object) =>
+    serverDo(token => Api.friendAction(token, action, body));
+
+  const sendMessageToServer = (partnerId: string, msg: { id: string; text: string; imageUrl?: string }) => {
+    serverDo(token => Api.post(token, '/api/messages', { id: msg.id, to: partnerId, text: msg.text, imageUrl: msg.imageUrl }));
+  };
+
+  const markConversationRead = (partnerId: string) => {
+    if (!currentUser) return;
+    const map = StorageService.getMessagesMap();
+    const convId = `conv_${[currentUser.id, partnerId].sort().join('_')}`;
+    const list = map[convId] || [];
+    if (!list.some(m => m.senderId !== currentUser.id && !m.isRead)) return;
+    map[convId] = list.map(m => (m.senderId !== currentUser.id ? { ...m, isRead: true } : m));
+    StorageService.saveMessagesMap(map);
+    setDataVersion(v => v + 1);
+    serverDo(token => Api.post(token, '/api/messages/read', { with: partnerId }));
   };
 
   useEffect(() => {
@@ -421,7 +460,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     if (!currentUser?.id || !isOnline) return;
     runSync();
-    const timer = setInterval(runSync, 15000);
+    const timer = setInterval(runSync, 8000);
     const onVisible = () => {
       if (document.visibilityState === 'visible') runSync();
     };
@@ -445,16 +484,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!currentUser) return;
     StorageService.sendFriendRequest(currentUser.id, targetUserId);
     serverFriend('request', { to: targetUserId });
-    const targetUser = users.find(u => u.id === targetUserId);
-    if (targetUser) {
-      StorageService.addNotification({
-        userId: targetUserId,
-        type: 'friend_request',
-        actorName: `${currentUser.firstName} ${currentUser.lastName}`,
-        actorAvatar: currentUser.avatar,
-        message: 'ay nagpadala sa iyo ng friend request.'
-      });
-    }
     setFriendshipsVersion(v => v + 1);
   };
 
@@ -469,16 +498,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!currentUser) return;
     StorageService.acceptFriendRequest(currentUser.id, targetUserId);
     serverFriend('accept', { from: targetUserId });
-    const targetUser = users.find(u => u.id === targetUserId);
-    if (targetUser) {
-      StorageService.addNotification({
-        userId: targetUserId,
-        type: 'friend_accept',
-        actorName: `${currentUser.firstName} ${currentUser.lastName}`,
-        actorAvatar: currentUser.avatar,
-        message: 'ay tinanggap ang iyong friend request.'
-      });
-    }
     setFriendshipsVersion(v => v + 1);
   };
 
@@ -579,6 +598,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         getFriendshipStatus,
         openUserChat,
         openUserProfile,
+        dataVersion,
+        sendMessageToServer,
+        markConversationRead,
       }}
     >
       {children}

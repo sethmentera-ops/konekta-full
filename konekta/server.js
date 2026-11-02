@@ -11,7 +11,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(['/api/me', '/api/auth/signup'], express.json({ limit: '6mb' }));
+app.use(['/api/me', '/api/auth/signup', '/api/posts', '/api/stories', '/api/messages'], express.json({ limit: '6mb' }));
 app.use(express.json({ limit: '10kb' }));
 
 
@@ -328,6 +328,7 @@ app.post('/api/auth/signup', needDb, wrap(async (req, res) => {
     throw err;
   }
   const saved = created[0];
+  await notify(saved.id, null, 'system', 'Maligayang pagdating sa Konekta! Maaari mong i-customize ang iyong Profile at Cover photo sa Profile page.', null);
   res.json({ ok: true, user: rowToUser(saved, true), token: sessionFor(saved) });
 }));
 
@@ -434,6 +435,7 @@ app.post('/api/friends/:action', needDb, needAuth, wrap(async (req, res) => {
         body: { from_id: me, to_id: other },
         prefer: 'resolution=ignore-duplicates,return=minimal',
       });
+      await notify(other, me, 'friend_request', 'ay nagpadala sa iyo ng friend request.', me);
     }
   } else if (action === 'cancel') {
     // also lets the receiver decline a request
@@ -447,9 +449,265 @@ app.post('/api/friends/:action', needDb, needAuth, wrap(async (req, res) => {
       prefer: 'resolution=ignore-duplicates,return=minimal',
     });
     await sb('DELETE', 'konekta_friend_requests', { query: pairFilter(me, other, 'from_id', 'to_id'), prefer: 'return=minimal' });
+    await notify(other, me, 'friend_accept', 'ay tinanggap ang iyong friend request.', me);
   } else if (action === 'unfriend') {
     await sb('DELETE', 'konekta_friends', { query: pairFilter(me, other, 'user_id', 'friend_id'), prefer: 'return=minimal' });
   }
+  res.json({ ok: true });
+}));
+
+
+// ---------------------------------------------------------------------------
+// Posts, comments, reactions, stories, chat, notifications
+// ---------------------------------------------------------------------------
+const REACTIONS = ['like', 'love', 'haha', 'wow', 'sad', 'angry'];
+const idOr = (v, prefix) => (typeof v === 'string' && SAFE_ID.test(v) ? v : `${prefix}_${crypto.randomBytes(8).toString('hex')}`);
+const inList = (ids) => ids.map((i) => enc(i)).join(',');
+
+async function myFriendIds(uid) {
+  const rows = await sb('GET', 'konekta_friends', { query: `?user_id=eq.${enc(uid)}&select=friend_id` });
+  return rows.map((r) => r.friend_id);
+}
+
+async function notify(userId, actorId, type, message, targetId) {
+  if (!userId || userId === actorId) return;
+  try {
+    await sb('POST', 'konekta_notifications', {
+      body: { id: idOr(null, 'n'), user_id: userId, actor_id: actorId || null, type, target_id: targetId || null, message },
+      prefer: 'return=minimal',
+    });
+  } catch (err) {
+    console.error('notify failed:', err.message);
+  }
+}
+
+// ---- Feed ----
+app.get('/api/feed', needDb, needAuth, wrap(async (req, res) => {
+  const me = req.uid;
+  const since = typeof req.query.since === 'string' ? req.query.since : '';
+  const friends = await myFriendIds(me);
+  const vis = ['privacy.eq.public', `user_id.eq.${enc(me)}`];
+  if (friends.length) vis.push(`and(privacy.eq.friends,user_id.in.(${inList(friends)}))`);
+
+  let query = `?select=*&or=(${vis.join(',')})`;
+  query += since
+    ? `&updated_at=gte.${enc(since)}&order=updated_at.asc&limit=300`
+    : '&deleted=eq.false&order=created_at.desc&limit=100';
+  const rows = await sb('GET', 'konekta_posts', { query });
+
+  const live = rows.filter((r) => !r.deleted);
+  const ids = live.map((r) => r.id);
+  let reactions = [], comments = [];
+  if (ids.length) {
+    [reactions, comments] = await Promise.all([
+      sb('GET', 'konekta_post_reactions', { query: `?post_id=in.(${inList(ids)})&select=post_id,user_id,type` }),
+      sb('GET', 'konekta_comments', { query: `?post_id=in.(${inList(ids)})&select=*&order=created_at.asc` }),
+    ]);
+  }
+  const posts = rows.map((r) => {
+    if (r.deleted) return { id: r.id, deleted: true };
+    const counts = { like: 0, love: 0, haha: 0, wow: 0, sad: 0, angry: 0 };
+    const userReactions = {};
+    reactions.filter((x) => x.post_id === r.id).forEach((x) => {
+      if (counts[x.type] !== undefined) counts[x.type] += 1;
+      userReactions[x.user_id] = x.type;
+    });
+    return {
+      id: r.id,
+      userId: r.user_id,
+      content: r.content,
+      imageUrl: r.image_url || undefined,
+      backgroundColor: r.background_color || undefined,
+      feeling: r.feeling || undefined,
+      location: r.location || undefined,
+      privacy: r.privacy,
+      sharesCount: r.shares_count || 0,
+      createdAt: r.created_at,
+      reactions: counts,
+      userReactions,
+      comments: comments.filter((c) => c.post_id === r.id).map((c) => ({
+        id: c.id, postId: c.post_id, userId: c.user_id, text: c.text, createdAt: c.created_at, likes: 0,
+      })),
+    };
+  });
+  const cursor = rows.length ? rows.reduce((m, r) => (r.updated_at > m ? r.updated_at : m), '') : since || null;
+  res.json({ ok: true, posts, cursor });
+}));
+
+app.post('/api/posts', needDb, needAuth, wrap(async (req, res) => {
+  const b = req.body || {};
+  const content = str(b.content, 5000);
+  const imageUrl = str(b.imageUrl, 5_000_000);
+  if (!content && !imageUrl) return res.status(400).json({ ok: false, error: 'Walang laman ang post.' });
+  const row = {
+    id: idOr(b.id, 'post'),
+    user_id: req.uid,
+    content,
+    image_url: imageUrl || null,
+    background_color: str(b.backgroundColor, 200) || null,
+    feeling: str(b.feeling, 100) || null,
+    location: str(b.location, 120) || null,
+    privacy: ['public', 'friends', 'only_me'].includes(b.privacy) ? b.privacy : 'public',
+  };
+  try {
+    await sb('POST', 'konekta_posts', { body: row, prefer: 'return=minimal' });
+  } catch (err) {
+    if (err.status !== 409) throw err; // same id sent twice: already saved
+  }
+  res.json({ ok: true, id: row.id });
+}));
+
+const touchPost = (postId) =>
+  sb('PATCH', 'konekta_posts', { query: `?id=eq.${enc(postId)}`, body: { updated_at: new Date().toISOString() }, prefer: 'return=minimal' });
+
+app.post('/api/posts/:id/delete', needDb, needAuth, wrap(async (req, res) => {
+  if (!SAFE_ID.test(req.params.id)) return res.status(400).json({ ok: false, error: 'Maling post.' });
+  await sb('PATCH', 'konekta_posts', {
+    query: `?id=eq.${enc(req.params.id)}&user_id=eq.${enc(req.uid)}`,
+    body: { deleted: true, updated_at: new Date().toISOString() },
+    prefer: 'return=minimal',
+  });
+  res.json({ ok: true });
+}));
+
+app.post('/api/posts/:id/react', needDb, needAuth, wrap(async (req, res) => {
+  const postId = req.params.id;
+  const type = req.body?.type;
+  if (!SAFE_ID.test(postId) || !REACTIONS.includes(type)) return res.status(400).json({ ok: false, error: 'Maling reaction.' });
+  const post = await sb('GET', 'konekta_posts', { query: `?id=eq.${enc(postId)}&deleted=eq.false&select=id,user_id&limit=1` });
+  if (!post.length) return res.status(404).json({ ok: false, error: 'Wala na ang post.' });
+  const mine = await sb('GET', 'konekta_post_reactions', { query: `?post_id=eq.${enc(postId)}&user_id=eq.${enc(req.uid)}&select=type&limit=1` });
+  if (mine.length && mine[0].type === type) {
+    await sb('DELETE', 'konekta_post_reactions', { query: `?post_id=eq.${enc(postId)}&user_id=eq.${enc(req.uid)}`, prefer: 'return=minimal' });
+  } else {
+    await sb('POST', 'konekta_post_reactions', {
+      query: '?on_conflict=post_id,user_id',
+      body: { post_id: postId, user_id: req.uid, type },
+      prefer: 'resolution=merge-duplicates,return=minimal',
+    });
+    if (!mine.length) await notify(post[0].user_id, req.uid, 'like', 'nag-react sa iyong post.', postId);
+  }
+  await touchPost(postId);
+  res.json({ ok: true });
+}));
+
+app.post('/api/posts/:id/comment', needDb, needAuth, wrap(async (req, res) => {
+  const postId = req.params.id;
+  const text = str(req.body?.text, 2000);
+  if (!SAFE_ID.test(postId) || !text) return res.status(400).json({ ok: false, error: 'Walang laman ang komento.' });
+  const post = await sb('GET', 'konekta_posts', { query: `?id=eq.${enc(postId)}&deleted=eq.false&select=id,user_id&limit=1` });
+  if (!post.length) return res.status(404).json({ ok: false, error: 'Wala na ang post.' });
+  try {
+    await sb('POST', 'konekta_comments', {
+      body: { id: idOr(req.body?.id, 'c'), post_id: postId, user_id: req.uid, text },
+      prefer: 'return=minimal',
+    });
+  } catch (err) {
+    if (err.status !== 409) throw err;
+  }
+  await touchPost(postId);
+  await notify(post[0].user_id, req.uid, 'comment', `nagkomento sa iyong post: "${text.slice(0, 30)}${text.length > 30 ? '...' : ''}"`, postId);
+  res.json({ ok: true });
+}));
+
+// ---- Stories (me + friends, last 24 hours) ----
+app.get('/api/stories', needDb, needAuth, wrap(async (req, res) => {
+  const friends = await myFriendIds(req.uid);
+  const who = [`user_id.eq.${enc(req.uid)}`];
+  if (friends.length) who.push(`user_id.in.(${inList(friends)})`);
+  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const rows = await sb('GET', 'konekta_stories', {
+    query: `?select=*&or=(${who.join(',')})&created_at=gte.${enc(cutoff)}&order=created_at.desc&limit=100`,
+  });
+  res.json({
+    ok: true,
+    stories: rows.map((r) => ({ id: r.id, userId: r.user_id, mediaUrl: r.media_url, caption: r.caption || undefined, createdAt: r.created_at })),
+  });
+}));
+
+app.post('/api/stories', needDb, needAuth, wrap(async (req, res) => {
+  const mediaUrl = str(req.body?.mediaUrl, 5_000_000);
+  if (!mediaUrl) return res.status(400).json({ ok: false, error: 'Walang media ang story.' });
+  try {
+    await sb('POST', 'konekta_stories', {
+      body: { id: idOr(req.body?.id, 'story'), user_id: req.uid, media_url: mediaUrl, caption: str(req.body?.caption, 300) || null },
+      prefer: 'return=minimal',
+    });
+  } catch (err) {
+    if (err.status !== 409) throw err;
+  }
+  res.json({ ok: true });
+}));
+
+// ---- Chat ----
+app.get('/api/messages', needDb, needAuth, wrap(async (req, res) => {
+  const me = enc(req.uid);
+  const since = typeof req.query.since === 'string' ? req.query.since : '';
+  const mine = `or=(sender_id.eq.${me},recipient_id.eq.${me})`;
+  const query = since
+    ? `?select=*&${mine}&updated_at=gte.${enc(since)}&order=updated_at.asc&limit=500`
+    : `?select=*&${mine}&order=created_at.desc&limit=500`;
+  const rows = await sb('GET', 'konekta_messages', { query });
+  const cursor = rows.length ? rows.reduce((m, r) => (r.updated_at > m ? r.updated_at : m), '') : since || null;
+  res.json({
+    ok: true,
+    cursor,
+    messages: rows.map((r) => ({
+      id: r.id, senderId: r.sender_id, recipientId: r.recipient_id, text: r.text,
+      imageUrl: r.image_url || undefined, isRead: !!r.is_read, createdAt: r.created_at,
+    })),
+  });
+}));
+
+app.post('/api/messages', needDb, needAuth, wrap(async (req, res) => {
+  const to = req.body?.to;
+  const text = str(req.body?.text, 4000);
+  const imageUrl = str(req.body?.imageUrl, 5_000_000);
+  if (typeof to !== 'string' || !SAFE_ID.test(to) || to === req.uid) return res.status(400).json({ ok: false, error: 'Maling tatanggap.' });
+  if (!text && !imageUrl) return res.status(400).json({ ok: false, error: 'Walang laman ang mensahe.' });
+  const target = await sb('GET', 'konekta_users', { query: `?id=eq.${enc(to)}&select=id&limit=1` });
+  if (!target.length) return res.status(404).json({ ok: false, error: 'Hindi nahanap ang user.' });
+  try {
+    await sb('POST', 'konekta_messages', {
+      body: { id: idOr(req.body?.id, 'm'), sender_id: req.uid, recipient_id: to, text, image_url: imageUrl || null },
+      prefer: 'return=minimal',
+    });
+  } catch (err) {
+    if (err.status !== 409) throw err;
+  }
+  res.json({ ok: true });
+}));
+
+app.post('/api/messages/read', needDb, needAuth, wrap(async (req, res) => {
+  const other = req.body?.with;
+  if (typeof other !== 'string' || !SAFE_ID.test(other)) return res.status(400).json({ ok: false, error: 'Maling user.' });
+  await sb('PATCH', 'konekta_messages', {
+    query: `?sender_id=eq.${enc(other)}&recipient_id=eq.${enc(req.uid)}&is_read=eq.false`,
+    body: { is_read: true, updated_at: new Date().toISOString() },
+    prefer: 'return=minimal',
+  });
+  res.json({ ok: true });
+}));
+
+// ---- Notifications ----
+app.get('/api/notifications', needDb, needAuth, wrap(async (req, res) => {
+  const rows = await sb('GET', 'konekta_notifications', { query: `?user_id=eq.${enc(req.uid)}&select=*&order=created_at.desc&limit=100` });
+  const actorIds = [...new Set(rows.map((r) => r.actor_id).filter(Boolean))];
+  let actors = [];
+  if (actorIds.length) actors = await sb('GET', 'konekta_users', { query: `?id=in.(${inList(actorIds)})&select=id,first_name,last_name` });
+  const nameOf = new Map(actors.map((a) => [a.id, `${a.first_name} ${a.last_name}`]));
+  res.json({
+    ok: true,
+    notifications: rows.map((r) => ({
+      id: r.id, userId: r.user_id, type: r.type, actorId: r.actor_id || null,
+      actorName: r.actor_id ? nameOf.get(r.actor_id) || 'Konekta User' : 'Konekta',
+      targetId: r.target_id || undefined, message: r.message, isRead: !!r.is_read, createdAt: r.created_at,
+    })),
+  });
+}));
+
+app.post('/api/notifications/read', needDb, needAuth, wrap(async (req, res) => {
+  await sb('PATCH', 'konekta_notifications', { query: `?user_id=eq.${enc(req.uid)}&is_read=eq.false`, body: { is_read: true }, prefer: 'return=minimal' });
   res.json({ ok: true });
 }));
 

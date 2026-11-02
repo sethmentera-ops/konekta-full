@@ -20,6 +20,7 @@ export interface Comment {
   userAvatar: string;
   text: string;
   timestamp: string;
+  createdAt?: string;
   likes: number;
 }
 
@@ -29,6 +30,7 @@ export interface Post {
   userName: string;
   userAvatar: string;
   userHandle?: string;
+  createdAt?: string;
   isVerified?: boolean;
   content: string;
   imageUrl?: string;
@@ -51,6 +53,7 @@ export interface Story {
   mediaUrl: string;
   caption?: string;
   timestamp: string;
+  createdAt?: string;
   isViewed?: boolean;
 }
 
@@ -80,6 +83,7 @@ export interface Message {
   imageUrl?: string;
   audioDuration?: number;
   timestamp: string;
+  createdAt?: string;
   isRead: boolean;
 }
 
@@ -100,6 +104,7 @@ export interface NotificationItem {
   targetId?: string;
   message: string;
   timestamp: string;
+  createdAt?: string;
   isRead: boolean;
 }
 

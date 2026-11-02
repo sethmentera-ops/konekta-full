@@ -275,6 +275,10 @@ export const DEFAULT_NOTIFICATIONS: NotificationItem[] = [];
 
 export const DEFAULT_MESSAGES: Record<string, Message[]> = {};
 
+// Unique, URL/DB-safe ids (the same id is used locally and on the server)
+const rid = (prefix: string) =>
+  `${prefix}_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
+
 // Storage helper functions
 export const StorageService = {
   // Users
@@ -387,8 +391,9 @@ export const StorageService = {
     const posts = this.getPosts();
     const post: Post = {
       ...newPostData,
-      id: 'post_' + Date.now(),
+      id: rid('post'),
       timestamp: 'Kani-kanina lang',
+      createdAt: new Date().toISOString(),
       reactions: { like: 0, love: 0, haha: 0, wow: 0, sad: 0, angry: 0 },
       userReactions: {},
       comments: [],
@@ -436,7 +441,8 @@ export const StorageService = {
     if (!post) return null;
 
     const newComment: Comment = {
-      id: 'c_' + Date.now(),
+      id: rid('c'),
+      createdAt: new Date().toISOString(),
       postId,
       userId: user.id,
       userName: `${user.firstName} ${user.lastName}`,
@@ -488,7 +494,8 @@ export const StorageService = {
   addStory(user: User, mediaUrl: string, caption?: string): Story {
     const stories = this.getStories();
     const newStory: Story = {
-      id: 'story_' + Date.now(),
+      id: rid('story'),
+      createdAt: new Date().toISOString(),
       userId: user.id,
       userName: `${user.firstName} ${user.lastName}`,
       userAvatar: user.avatar,
@@ -499,6 +506,14 @@ export const StorageService = {
     stories.unshift(newStory);
     localStorage.setItem(STORAGE_KEYS.STORIES, JSON.stringify(stories));
     return newStory;
+  },
+
+  saveStories(stories: Story[]): void {
+    try {
+      localStorage.setItem(STORAGE_KEYS.STORIES, JSON.stringify(stories));
+    } catch (e) {
+      console.error('Error saving stories:', e);
+    }
   },
 
   // Videos
@@ -633,6 +648,32 @@ export const StorageService = {
     }
   },
 
+  getAllNotifications(): NotificationItem[] {
+    try {
+      const data = localStorage.getItem(STORAGE_KEYS.NOTIFICATIONS);
+      if (data) return JSON.parse(data);
+    } catch (e) {
+      console.warn(e);
+    }
+    return [];
+  },
+
+  saveAllNotifications(list: NotificationItem[]): void {
+    try {
+      localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(list));
+    } catch (e) {
+      console.warn(e);
+    }
+  },
+
+  saveMessagesMap(map: Record<string, Message[]>): void {
+    try {
+      localStorage.setItem(STORAGE_KEYS.MESSAGES, JSON.stringify(map));
+    } catch (e) {
+      console.warn(e);
+    }
+  },
+
   // Messages & Chat
   getMessagesMap(): Record<string, Message[]> {
     try {
@@ -658,7 +699,8 @@ export const StorageService = {
     const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
     const newMsg: Message = {
-      id: 'm_' + Date.now(),
+      id: rid('m'),
+      createdAt: now.toISOString(),
       conversationId: convId,
       senderId,
       text,

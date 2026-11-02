@@ -23,7 +23,10 @@ export const ChatView: React.FC = () => {
     users, 
     activeChatUserId, 
     setActiveChatUserId,
-    setViewingProfileUserId 
+    setViewingProfileUserId,
+    dataVersion,
+    sendMessageToServer,
+    markConversationRead
   } = useApp();
 
   const [messages, setMessages] = useState<Message[]>([]);
@@ -50,7 +53,9 @@ export const ChatView: React.FC = () => {
     } else {
       setMessages([]);
     }
-  }, [activeConvId, activeChatUserId]);
+    if (activeConvId && activeChatUserId) markConversationRead(activeChatUserId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeConvId, activeChatUserId, dataVersion]);
 
   // Scroll to bottom on message updates
   useEffect(() => {
@@ -65,6 +70,7 @@ export const ChatView: React.FC = () => {
     // Save sent message to database/storage
     const newMsg = StorageService.sendMessage(activeConvId, currentUser.id, text, imgUrl);
     setMessages((prev) => [...prev, newMsg]);
+    sendMessageToServer(activePartner.id, { id: newMsg.id, text, imageUrl: imgUrl });
     setInputText('');
   };
 
