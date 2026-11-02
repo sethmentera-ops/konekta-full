@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import {
   User,
   Post,
@@ -11,6 +11,8 @@ import {
   Comment
 } from '../types';
 import { StorageService } from '../services/storage';
+import { Api, Sessions } from '../services/api';
+import { syncFromServer } from '../services/sync';
 import { SupportedLanguage, TRANSLATIONS } from '../services/translations';
 
 interface AppContextType {
@@ -53,8 +55,10 @@ interface AppContextType {
   setShowSwitchAccountModal: (show: boolean) => void;
   authView: 'login' | 'signup' | 'forgot_password' | null;
   setAuthView: (view: 'login' | 'signup' | 'forgot_password' | null) => void;
-  login: (emailOrPhone: string, password: string) => { success: boolean; error?: string };
-  signup: (userData: Omit<User, 'id' | 'createdAt' | 'friendsCount'>) => { success: boolean; user?: User; error?: string };
+  login: (emailOrPhone: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  signup: (userData: Omit<User, 'id' | 'createdAt' | 'friendsCount'>, proof: string) => Promise<{ success: boolean; user?: User; error?: string }>;
+  resetPasswordWithProof: (proof: string, newPassword: string) => Promise<{ success: boolean; error?: string }>;
+  deviceAccounts: User[];
   logout: () => void;
   switchAccount: (userId: string) => void;
   updateUserProfile: (user: User) => void;
@@ -180,32 +184,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const login = (emailOrPhone: string, password: string) => {
-    const allUsers = StorageService.getUsers();
-    const cleanId = emailOrPhone.trim().toLowerCase();
-    const found = allUsers.find(
-      u => (u.emailOrPhone.toLowerCase() === cleanId) && (u.password === password)
-    );
-
-    if (found) {
-      StorageService.setCurrentUser(found);
-      setCurrentUser(found);
-      setAuthView(null);
-      return { success: true };
-    }
-    return { success: false, error: 'Maling email/numero o password. Pakisuri muli.' };
+  // Saves a freshly authenticated account (from the server) on this device
+  const finishAuth = (user: User, token: string) => {
+    Sessions.save(user.id, token);
+    const others = StorageService.getUsers().filter(u => u.id !== user.id);
+    const me: User = { ...user, friendsCount: user.friendsCount ?? 0, isOnline: true };
+    StorageService.saveUsers([me, ...others]);
+    StorageService.setCurrentUser(me);
+    setUsers(StorageService.getUsers());
+    setCurrentUser(me);
+    setAuthView(null);
+    return me;
   };
 
-  const signup = (userData: Omit<User, 'id' | 'createdAt' | 'friendsCount'>) => {
-    const existing = StorageService.findUserByEmailOrPhone(userData.emailOrPhone);
-    if (existing) {
-      return { success: false, error: 'May gumagamit na ng email o mobile number na ito sa Konekta.' };
+  const login = async (emailOrPhone: string, password: string) => {
+    const res = await Api.login(emailOrPhone.trim(), password);
+    if (!res.ok || !res.data) {
+      return { success: false, error: res.error || 'Maling email/numero o password. Pakisuri muli.' };
     }
-    const newUser = StorageService.createUser(userData);
-    StorageService.setCurrentUser(newUser);
-    setCurrentUser(newUser);
-    setUsers(StorageService.getUsers());
-    setAuthView(null);
+    finishAuth(res.data.user, res.data.token);
+    return { success: true };
+  };
+
+  const signup = async (userData: Omit<User, 'id' | 'createdAt' | 'friendsCount'>, proof: string) => {
+    const res = await Api.signup({ ...userData, proof });
+    if (!res.ok || !res.data) {
+      return { success: false, error: res.error || 'Hindi nagawa ang account. Subukan ulit.' };
+    }
+    const newUser = finishAuth(res.data.user, res.data.token);
 
     StorageService.addNotification({
       userId: newUser.id,
@@ -218,7 +224,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return { success: true, user: newUser };
   };
 
+  const resetPasswordWithProof = async (proof: string, newPassword: string) => {
+    const res = await Api.reset(proof, newPassword);
+    if (!res.ok || !res.data) {
+      return { success: false, error: res.error || 'Hindi napalitan ang password. Subukan ulit.' };
+    }
+    finishAuth(res.data.user, res.data.token);
+    return { success: true };
+  };
+
   const logout = () => {
+    if (currentUser) Sessions.remove(currentUser.id);
     StorageService.setCurrentUser(null);
     setCurrentUser(null);
     setShowLogoutModal(false);
@@ -226,6 +242,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const switchAccount = (userId: string) => {
+    if (!Sessions.has(userId)) return; // only accounts logged in on this device
     const allUsers = StorageService.getUsers();
     const target = allUsers.find(u => u.id === userId);
     if (target) {
@@ -256,6 +273,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
     StorageService.savePosts(modifiedPosts);
     setPosts(modifiedPosts);
+
+    // Save to the shared database so other devices see the change
+    const token = Sessions.tokenFor(updated.id);
+    if (token) {
+      Api.updateMe(token, {
+        firstName: updated.firstName,
+        lastName: updated.lastName,
+        avatar: updated.avatar,
+        coverPhoto: updated.coverPhoto,
+        bio: updated.bio,
+        gender: updated.gender,
+        birthday: updated.birthday,
+        location: updated.location,
+        work: updated.work,
+      });
+    }
   };
 
   const resetUserPassword = (emailOrPhone: string, newPass: string) => {
@@ -335,9 +368,83 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setIsSearchOpen(false);
   };
 
+  // ---- Shared database sync -------------------------------------------------
+  const syncingRef = useRef(false);
+
+  const runSync = async () => {
+    if (!currentUser || syncingRef.current) return;
+    syncingRef.current = true;
+    try {
+      const res = await syncFromServer(currentUser.id);
+      if (res.unauthorized) {
+        // login expired or was removed on the server
+        Sessions.remove(currentUser.id);
+        StorageService.setCurrentUser(null);
+        setCurrentUser(null);
+        setAuthView('login');
+        return;
+      }
+      if (res.changed) {
+        const list = StorageService.getUsers();
+        setUsers(list);
+        const fresh = list.find(u => u.id === currentUser.id);
+        if (fresh && JSON.stringify(fresh) !== JSON.stringify(currentUser)) {
+          StorageService.setCurrentUser(fresh);
+          setCurrentUser(fresh);
+        }
+        setFriendshipsVersion(v => v + 1);
+      }
+    } finally {
+      syncingRef.current = false;
+    }
+  };
+
+  // Sends a friend action to the server, then pulls the real state back
+  const serverFriend = async (action: 'request' | 'cancel' | 'accept' | 'unfriend', body: object) => {
+    const token = Sessions.tokenFor(currentUser?.id);
+    if (!token) return;
+    await Api.friendAction(token, action, body);
+    while (syncingRef.current) await new Promise(r => setTimeout(r, 100));
+    runSync();
+  };
+
+  useEffect(() => {
+    // sessions from before the shared database have no login token: ask to log in again
+    if (currentUser && !Sessions.tokenFor(currentUser.id)) {
+      StorageService.setCurrentUser(null);
+      setCurrentUser(null);
+      setAuthView('login');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!currentUser?.id || !isOnline) return;
+    runSync();
+    const timer = setInterval(runSync, 15000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') runSync();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser?.id, isOnline]);
+
+  const deviceAccounts = (() => {
+    const list = users.filter(u => Sessions.has(u.id));
+    if (currentUser && !list.some(u => u.id === currentUser.id)) list.unshift(currentUser);
+    return list;
+  })();
+
   const sendFriendRequest = (targetUserId: string) => {
     if (!currentUser) return;
     StorageService.sendFriendRequest(currentUser.id, targetUserId);
+    serverFriend('request', { to: targetUserId });
     const targetUser = users.find(u => u.id === targetUserId);
     if (targetUser) {
       StorageService.addNotification({
@@ -354,12 +461,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const cancelFriendRequest = (targetUserId: string) => {
     if (!currentUser) return;
     StorageService.cancelFriendRequest(currentUser.id, targetUserId);
+    serverFriend('cancel', { to: targetUserId });
     setFriendshipsVersion(v => v + 1);
   };
 
   const acceptFriendRequest = (targetUserId: string) => {
     if (!currentUser) return;
     StorageService.acceptFriendRequest(currentUser.id, targetUserId);
+    serverFriend('accept', { from: targetUserId });
     const targetUser = users.find(u => u.id === targetUserId);
     if (targetUser) {
       StorageService.addNotification({
@@ -376,6 +485,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const unfriend = (targetUserId: string) => {
     if (!currentUser) return;
     StorageService.unfriend(currentUser.id, targetUserId);
+    serverFriend('unfriend', { target: targetUserId });
     setFriendshipsVersion(v => v + 1);
   };
 
@@ -445,6 +555,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setAuthView,
         login,
         signup,
+        resetPasswordWithProof,
+        deviceAccounts,
         logout,
         switchAccount,
         updateUserProfile,

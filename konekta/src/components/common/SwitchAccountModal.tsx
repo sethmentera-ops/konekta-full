@@ -9,7 +9,7 @@ interface SwitchAccountModalProps {
 }
 
 export const SwitchAccountModal: React.FC<SwitchAccountModalProps> = ({ isOpen, onClose }) => {
-  const { users, currentUser, switchAccount, setAuthView } = useApp();
+  const { deviceAccounts: users, currentUser, switchAccount, setAuthView } = useApp();
 
   if (!isOpen) return null;
 

@@ -9,8 +9,9 @@ export const InstallPrompt: React.FC = () => {
   const [, force] = useState(0);
   const [visible, setVisible] = useState(false);
   const [showSteps, setShowSteps] = useState(false);
+  const [tick, setTick] = useState(0);
 
-  const eligible = () => PwaInstall.isMobile() && !PwaInstall.isInstalled();
+  const eligible = () => !PwaInstall.isInstalled();
 
   useEffect(() => PwaInstall.subscribe(() => force((n) => n + 1)), []);
 
@@ -20,17 +21,18 @@ export const InstallPrompt: React.FC = () => {
 
   useEffect(() => {
     if (visible || !eligible()) return;
-    const id = setTimeout(() => setVisible(true), RESHOW_MS);
+    const id = setTimeout(() => {
+      const el = document.activeElement as HTMLElement | null;
+      const typing = !!el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
+      if (typing) { setVisible(false); setTick((n) => n + 1); return; }
+      setVisible(true);
+    }, RESHOW_MS);
     return () => clearTimeout(id);
-  }, [visible]);
+  }, [visible, tick]);
 
   if (!visible || !eligible()) return null;
 
-    const onInstall = async () => {
-    if (showSteps) {
-      later();
-      return;
-    }
+  const onInstall = async () => {
     if (PwaInstall.canPrompt()) {
       const ok = await PwaInstall.prompt();
       if (ok) setVisible(false);
@@ -45,10 +47,10 @@ export const InstallPrompt: React.FC = () => {
   };
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-end justify-center bg-black/60">
-      <div className="w-full max-w-md bg-white dark:bg-gray-900 rounded-t-3xl p-5 pb-6 shadow-2xl text-gray-900 dark:text-gray-100">
+    <div className="fixed inset-x-0 bottom-0 z-[100] flex justify-center pointer-events-none">
+      <div className="pointer-events-auto w-full max-w-md bg-white dark:bg-gray-900 rounded-t-2xl p-4 shadow-[0_-8px_30px_rgba(0,0,0,0.25)] border-t border-gray-200 dark:border-gray-700 text-gray-900 dark:text-gray-100">
         <div className="flex items-center gap-3">
-          <img src="/icon-192.png" alt="Konekta" className="w-14 h-14 rounded-2xl shadow" />
+          <img src="/icon-192.png" alt="Konekta" className="w-11 h-11 rounded-xl shadow" />
           <div>
             <h2 className="text-lg font-extrabold leading-tight">I-install ang Konekta</h2>
             <p className="text-xs text-gray-500 dark:text-gray-400">Mabilis, magaan, at matipid sa data</p>
@@ -63,6 +65,12 @@ export const InstallPrompt: React.FC = () => {
                 <li>Piliin ang <b>Add to Home Screen</b>.</li>
                 <li>Pindutin ang <b>Add</b>.</li>
               </>
+            ) : !PwaInstall.isMobile() ? (
+              <>
+                <li>Hanapin ang <b>install icon</b> sa dulo ng address bar (kanan), o pindutin ang <b>⋮</b> sa taas ng Chrome/Edge.</li>
+                <li>Piliin ang <b>Install Konekta</b> (o <b>Save and share → Install</b>).</li>
+                <li>Pindutin ang <b>Install</b>. Lalabas ang Konekta sa Start menu at desktop.</li>
+              </>
             ) : (
               <>
                 <li>Pindutin ang <b>⋮</b> (tatlong tuldok) sa taas ng Chrome.</li>
@@ -72,20 +80,20 @@ export const InstallPrompt: React.FC = () => {
             )}
           </ol>
         ) : (
-          <p className="mt-3 text-sm text-gray-600 dark:text-gray-300">
+          <p className="mt-2 text-xs text-gray-600 dark:text-gray-300">
             I-install ang app para mas mabilis buksan, may icon sa home screen, at gagana tulad ng Facebook Lite.
           </p>
         )}
 
         <button
           onClick={onInstall}
-          className="mt-4 w-full py-3 bg-blue-600 active:bg-blue-700 text-white text-sm font-bold rounded-xl"
+          className="mt-3 w-full py-2.5 bg-blue-600 active:bg-blue-700 text-white text-sm font-bold rounded-xl"
         >
           {showSteps ? 'Sige, na-gets ko' : 'I-install ang App'}
         </button>
         <button
           onClick={later}
-          className="mt-2 w-full py-2 text-xs font-semibold text-gray-500 dark:text-gray-400"
+          className="mt-1 w-full py-1.5 text-xs font-semibold text-gray-500 dark:text-gray-400"
         >
           Mamaya na
         </button>

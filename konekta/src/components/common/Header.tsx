@@ -121,8 +121,6 @@ export const Header: React.FC = () => {
               </span>
             )}
           </button>
-
-          
         </div>
       </div>
     </header>

@@ -11,7 +11,7 @@ export const LoginView: React.FC = () => {
   const [errorMessage, setErrorMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage('');
 
@@ -25,13 +25,11 @@ export const LoginView: React.FC = () => {
     }
 
     setIsLoading(true);
-    setTimeout(() => {
-      const res = login(emailOrPhone, password);
-      setIsLoading(false);
-      if (!res.success) {
-        setErrorMessage(res.error || 'Invalid login credentials.');
-      }
-    }, 350);
+    const res = await login(emailOrPhone, password);
+    setIsLoading(false);
+    if (!res.success) {
+      setErrorMessage(res.error || 'Invalid login credentials.');
+    }
   };
 
   return (

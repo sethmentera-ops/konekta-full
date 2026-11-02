@@ -1,46 +1,79 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import { ArrowLeft, KeyRound, CheckCircle, AlertCircle } from 'lucide-react';
+import { OtpService } from '../../services/otp';
 
 export const ForgotPasswordView: React.FC = () => {
-  const { setAuthView, resetUserPassword, login } = useApp();
+  const { setAuthView, resetPasswordWithProof } = useApp();
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [emailOrPhone, setEmailOrPhone] = useState('');
-  const [generatedCode, setGeneratedCode] = useState('');
   const [inputCode, setInputCode] = useState('');
+  const [proof, setProof] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const [isSuccess, setIsSuccess] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [cooldown, setCooldown] = useState(0);
 
-  // Step 1: Request code
-  const handleRequestCode = (e: React.FormEvent) => {
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const id = setTimeout(() => setCooldown((c) => c - 1), 1000);
+    return () => clearTimeout(id);
+  }, [cooldown]);
+
+  // Step 1: send a real PIN to the account's email / mobile number
+  const handleRequestCode = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage('');
     if (!emailOrPhone.trim()) {
       setErrorMessage('Please enter your mobile number or email address.');
       return;
     }
-    // Generate simulated 6-digit verification code
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    setGeneratedCode(code);
-    setInputCode(code); // Pre-fill for seamless verification experience
+    setIsLoading(true);
+    const res = await OtpService.send(emailOrPhone.trim(), 'reset');
+    setIsLoading(false);
+    if (!res.ok) {
+      setErrorMessage(res.error || 'Hindi naipadala ang PIN.');
+      return;
+    }
+    setInputCode('');
+    setCooldown(res.resendIn ?? 60);
     setStep(2);
   };
 
-  // Step 2: Verify code
-  const handleVerifyCode = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (inputCode.trim() !== generatedCode) {
-      setErrorMessage('Invalid verification code. Please try again.');
+  const handleResend = async () => {
+    if (cooldown > 0) return;
+    setErrorMessage('');
+    const res = await OtpService.send(emailOrPhone.trim(), 'reset');
+    if (!res.ok) {
+      setErrorMessage(res.error || 'Hindi naipadala ang PIN.');
       return;
     }
+    setCooldown(res.resendIn ?? 60);
+  };
+
+  // Step 2: verify the PIN with the server
+  const handleVerifyCode = async (e: React.FormEvent) => {
+    e.preventDefault();
     setErrorMessage('');
+    if (!/^\d{6}$/.test(inputCode.trim())) {
+      setErrorMessage('Ilagay ang 6-digit na PIN.');
+      return;
+    }
+    setIsLoading(true);
+    const res = await OtpService.verify(emailOrPhone.trim(), inputCode.trim(), 'reset');
+    setIsLoading(false);
+    if (!res.ok || !res.proof) {
+      setErrorMessage(res.error || 'Mali ang PIN. Subukan ulit.');
+      return;
+    }
+    setProof(res.proof);
     setStep(3);
   };
 
-  // Step 3: Set new password
-  const handleSetNewPassword = (e: React.FormEvent) => {
+  // Step 3: set the new password (the server checks the verified proof)
+  const handleSetNewPassword = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage('');
     if (newPassword.length < 6) {
@@ -51,15 +84,13 @@ export const ForgotPasswordView: React.FC = () => {
       setErrorMessage('Passwords do not match.');
       return;
     }
-
-    const ok = resetUserPassword(emailOrPhone, newPassword);
-    if (ok) {
-      setIsSuccess(true);
-      setTimeout(() => {
-        login(emailOrPhone, newPassword);
-      }, 1200);
+    setIsLoading(true);
+    const res = await resetPasswordWithProof(proof, newPassword);
+    setIsLoading(false);
+    if (res.success) {
+      setIsSuccess(true); // the app logs the user in automatically
     } else {
-      setErrorMessage('Account not found in the database. Please check your email or phone.');
+      setErrorMessage(res.error || 'Hindi napalitan ang password.');
     }
   };
 
@@ -135,7 +166,7 @@ export const ForgotPasswordView: React.FC = () => {
                     type="submit"
                     className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold rounded-xl shadow-xs transition-all"
                   >
-                    Send Verification Code
+                    {isLoading ? 'Sandali...' : 'Send Verification Code'}
                   </button>
                 </form>
               )}
@@ -143,10 +174,9 @@ export const ForgotPasswordView: React.FC = () => {
               {/* STEP 2: Input verification code */}
               {step === 2 && (
                 <form onSubmit={handleVerifyCode} className="space-y-4">
-                  <div className="p-3 bg-blue-50 dark:bg-blue-950/40 rounded-xl border border-blue-200 dark:border-blue-800 text-xs text-blue-900 dark:text-blue-200">
-                    <p className="font-semibold mb-1">Konekta Security Verification:</p>
-                    <p>Your 6-digit verification code is: <strong className="text-base text-blue-600 dark:text-blue-400 tracking-widest">{generatedCode}</strong></p>
-                  </div>
+                  <p className="text-sm text-gray-700 dark:text-gray-300">
+                    Nagpadala kami ng 6-digit na PIN sa <b>{emailOrPhone.trim()}</b>.
+                  </p>
 
                   <div>
                     <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">
@@ -157,7 +187,9 @@ export const ForgotPasswordView: React.FC = () => {
                       maxLength={6}
                       required
                       value={inputCode}
-                      onChange={(e) => setInputCode(e.target.value)}
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
+                      onChange={(e) => setInputCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
                       placeholder="e.g. 123456"
                       className="w-full px-3 py-2 text-center tracking-widest text-lg font-bold bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-xl text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
@@ -167,7 +199,15 @@ export const ForgotPasswordView: React.FC = () => {
                     type="submit"
                     className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold rounded-xl shadow-xs transition-all"
                   >
-                    Verify Code
+                    {isLoading ? 'Sandali...' : 'Verify Code'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleResend}
+                    disabled={cooldown > 0}
+                    className="w-full text-xs font-semibold text-blue-600 dark:text-blue-400 disabled:text-gray-400 hover:underline"
+                  >
+                    {cooldown > 0 ? `Ipadala ulit (${cooldown}s)` : 'Ipadala ulit ang PIN'}
                   </button>
                 </form>
               )}
@@ -207,7 +247,7 @@ export const ForgotPasswordView: React.FC = () => {
                     type="submit"
                     className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-bold rounded-xl shadow-xs transition-all"
                   >
-                    Save and Log In
+                    {isLoading ? 'Sandali...' : 'Save and Log In'}
                   </button>
                 </form>
               )}

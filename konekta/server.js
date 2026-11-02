@@ -3,6 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import nodemailer from 'nodemailer';
 import { fileURLToPath } from 'url';
+import { promisify } from 'util';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -10,10 +11,138 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+app.use(['/api/me', '/api/auth/signup'], express.json({ limit: '6mb' }));
 app.use(express.json({ limit: '10kb' }));
 
+
 // ---------------------------------------------------------------------------
-// OTP / PIN verification (email via Brevo or Gmail, SMS via Semaphore)
+// Shared helpers: signed tokens, password hashing, Supabase REST
+// ---------------------------------------------------------------------------
+const SESSION_SECRET = process.env.SESSION_SECRET || process.env.OTP_SECRET || 'konekta-dev-secret';
+const SESSION_TTL_MS = 365 * 24 * 60 * 60 * 1000;   // login stays valid for 1 year
+const PROOF_TTL_MS = 15 * 60 * 1000;                // verified-PIN proof valid for 15 minutes
+const scrypt = promisify(crypto.scrypt);
+
+function signPayload(payload) {
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(body).digest('base64url');
+  return `${body}.${sig}`;
+}
+
+function readPayload(token) {
+  if (typeof token !== 'string') return null;
+  const [body, sig] = token.split('.');
+  if (!body || !sig) return null;
+  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(body).digest('base64url');
+  const a = Buffer.from(sig), b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  try {
+    const p = JSON.parse(Buffer.from(body, 'base64url').toString());
+    if (!p.exp || p.exp < Date.now()) return null;
+    return p;
+  } catch { return null; }
+}
+
+async function hashPassword(pw) {
+  const salt = crypto.randomBytes(16);
+  const h = await scrypt(pw, salt, 64);
+  return `${salt.toString('hex')}:${h.toString('hex')}`;
+}
+
+async function checkPassword(pw, stored) {
+  const [s, h] = String(stored || '').split(':');
+  if (!s || !h) return false;
+  const d = await scrypt(pw, Buffer.from(s, 'hex'), 64);
+  const e = Buffer.from(h, 'hex');
+  return d.length === e.length && crypto.timingSafeEqual(d, e);
+}
+
+const SUPABASE_URL = (process.env.SUPABASE_URL || '').replace(/\/+$/, '');
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
+const dbReady = !!(SUPABASE_URL && SUPABASE_KEY);
+
+async function sb(method, table, { query = '', body, prefer } = {}) {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}${query}`, {
+    method,
+    headers: {
+      apikey: SUPABASE_KEY,
+      // legacy service_role keys are JWTs and go in Authorization too;
+      // the newer sb_secret_ keys are not JWTs and must only be sent as apikey
+      ...(SUPABASE_KEY.startsWith('sb_') ? {} : { Authorization: `Bearer ${SUPABASE_KEY}` }),
+      'Content-Type': 'application/json',
+      ...(prefer ? { Prefer: prefer } : {}),
+    },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(15000),
+  });
+  const text = await r.text();
+  if (!r.ok) {
+    const err = new Error(`Supabase ${r.status} ${text}`);
+    err.status = r.status;
+    throw err;
+  }
+  return text ? JSON.parse(text) : null;
+}
+
+const enc = encodeURIComponent;
+const SAFE_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+async function findUserByKey(key) {
+  const rows = await sb('GET', 'konekta_users', { query: `?identifier=eq.${enc(key)}&select=*&limit=1` });
+  return rows && rows[0] ? rows[0] : null;
+}
+
+function maskContact(v) {
+  const s = String(v || '');
+  if (s.includes('@')) {
+    const [name, domain] = s.split('@');
+    return `${name.slice(0, 2)}***@${domain}`;
+  }
+  const d = s.replace(/\D/g, '');
+  return d.length > 4 ? `${d.slice(0, 2)}${'*'.repeat(d.length - 4)}${d.slice(-2)}` : '***';
+}
+
+function rowToUser(r, self) {
+  return {
+    id: r.id,
+    firstName: r.first_name,
+    lastName: r.last_name,
+    emailOrPhone: self ? r.email_or_phone : maskContact(r.email_or_phone),
+    avatar: r.avatar || '',
+    coverPhoto: r.cover_photo || '',
+    bio: r.bio || '',
+    gender: r.gender || 'iba',
+    birthday: r.birthday || undefined,
+    location: r.location || '',
+    work: r.work || '',
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+const wrap = (fn) => (req, res) =>
+  fn(req, res).catch((err) => {
+    console.error('API error:', err.message);
+    res.status(500).json({ ok: false, error: 'May error sa server. Subukan ulit.' });
+  });
+
+const needDb = (req, res, next) => {
+  if (!dbReady) return res.status(503).json({ ok: false, error: 'Hindi pa naka-set up ang database ng server.' });
+  next();
+};
+
+const needAuth = (req, res, next) => {
+  const h = String(req.headers.authorization || '');
+  const p = readPayload(h.startsWith('Bearer ') ? h.slice(7) : '');
+  if (!p || p.t !== 'session' || !p.uid) return res.status(401).json({ ok: false, error: 'Mag-log in ulit.' });
+  req.uid = p.uid;
+  next();
+};
+
+const loginFails = new Map(); // key -> { count, resetAt }
+
+// ---------------------------------------------------------------------------
+// OTP / PIN verification (email via Gmail, SMS via Semaphore)
 // ---------------------------------------------------------------------------
 const OTP_TTL_MS = 10 * 60 * 1000;      // PIN valid for 10 minutes
 const OTP_RESEND_MS = 60 * 1000;        // wait 60s before resending
@@ -51,11 +180,23 @@ setInterval(() => {
   for (const [k, v] of otpStore) if (v.expires < now) otpStore.delete(k);
 }, 60 * 1000).unref();
 
-app.post('/api/otp/send', async (req, res) => {
+app.post('/api/otp/send', wrap(async (req, res) => {
   const id = parseIdentifier(req.body?.identifier);
   if (!id) return res.status(400).json({ ok: false, error: 'Mali ang email o mobile number.' });
+  const purpose = req.body?.purpose === 'reset' ? 'reset' : 'signup';
+  const slot = `${purpose}|${id.key}`;
 
-  const existing = otpStore.get(id.key);
+  if (dbReady) {
+    const found = await findUserByKey(id.key);
+    if (purpose === 'signup' && found) {
+      return res.status(409).json({ ok: false, error: 'May account na gamit ang email o numerong ito. Mag-log in na lang.' });
+    }
+    if (purpose === 'reset' && !found) {
+      return res.status(404).json({ ok: false, error: 'Walang account na gumagamit ng email o numerong ito.' });
+    }
+  }
+
+  const existing = otpStore.get(slot);
   if (existing && Date.now() - existing.lastSent < OTP_RESEND_MS) {
     const wait = Math.ceil((OTP_RESEND_MS - (Date.now() - existing.lastSent)) / 1000);
     return res.status(429).json({ ok: false, error: `Maghintay ng ${wait} segundo bago humingi ulit ng PIN.`, retryAfter: wait });
@@ -110,22 +251,24 @@ app.post('/api/otp/send', async (req, res) => {
     return res.status(502).json({ ok: false, error: 'Hindi naipadala ang PIN. Subukan ulit mamaya.' });
   }
 
-  otpStore.set(id.key, { hash: hashCode(id.key, code), expires: Date.now() + OTP_TTL_MS, attempts: 0, lastSent: Date.now() });
+  otpStore.set(slot, { hash: hashCode(id.key, code), expires: Date.now() + OTP_TTL_MS, attempts: 0, lastSent: Date.now() });
   res.json({ ok: true, channel: id.type, resendIn: OTP_RESEND_MS / 1000 });
-});
+}));
 
 app.post('/api/otp/verify', (req, res) => {
   const id = parseIdentifier(req.body?.identifier);
   const code = String(req.body?.code || '').trim();
   if (!id || !/^\d{6}$/.test(code)) return res.status(400).json({ ok: false, error: 'Maling PIN.' });
+  const purpose = req.body?.purpose === 'reset' ? 'reset' : 'signup';
+  const slot = `${purpose}|${id.key}`;
 
-  const rec = otpStore.get(id.key);
+  const rec = otpStore.get(slot);
   if (!rec || rec.expires < Date.now()) {
-    otpStore.delete(id.key);
+    otpStore.delete(slot);
     return res.status(400).json({ ok: false, error: 'Expired na ang PIN. Humingi ng bago.' });
   }
   if (rec.attempts >= OTP_MAX_ATTEMPTS) {
-    otpStore.delete(id.key);
+    otpStore.delete(slot);
     return res.status(429).json({ ok: false, error: 'Sobra na ang maling tangka. Humingi ng bagong PIN.' });
   }
   rec.attempts += 1;
@@ -133,9 +276,182 @@ app.post('/api/otp/verify', (req, res) => {
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
     return res.status(400).json({ ok: false, error: 'Mali ang PIN. Subukan ulit.' });
   }
-  otpStore.delete(id.key); // one-time use
-  res.json({ ok: true });
+  otpStore.delete(slot); // one-time use
+  const proof = signPayload({ t: 'proof', k: id.key, p: purpose, exp: Date.now() + PROOF_TTL_MS });
+  res.json({ ok: true, proof });
 });
+
+
+// ---------------------------------------------------------------------------
+// Accounts, directory and friends (shared database)
+// ---------------------------------------------------------------------------
+const GENDERS = ['lalaki', 'babae', 'iba'];
+const str = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
+
+function sessionFor(row) {
+  return signPayload({ t: 'session', uid: row.id, exp: Date.now() + SESSION_TTL_MS });
+}
+
+app.post('/api/auth/signup', needDb, wrap(async (req, res) => {
+  const b = req.body || {};
+  const proof = readPayload(b.proof);
+  const id = parseIdentifier(b.emailOrPhone);
+  if (!proof || proof.t !== 'proof' || proof.p !== 'signup' || !id || proof.k !== id.key) {
+    return res.status(400).json({ ok: false, error: 'Hindi pa na-verify ang PIN. Humingi ng bagong PIN.' });
+  }
+  const firstName = str(b.firstName, 50), lastName = str(b.lastName, 50);
+  const password = typeof b.password === 'string' ? b.password : '';
+  if (!firstName || !lastName) return res.status(400).json({ ok: false, error: 'Kulang ang pangalan.' });
+  if (password.length < 6 || password.length > 200) {
+    return res.status(400).json({ ok: false, error: 'Ang password ay dapat 6 hanggang 200 character.' });
+  }
+  if (await findUserByKey(id.key)) {
+    return res.status(409).json({ ok: false, error: 'May account na gamit ang email o numerong ito. Mag-log in na lang.' });
+  }
+  const row = {
+    id: 'user_' + crypto.randomBytes(8).toString('hex'),
+    identifier: id.key,
+    email_or_phone: str(b.emailOrPhone, 120),
+    first_name: firstName,
+    last_name: lastName,
+    password_hash: await hashPassword(password),
+    gender: GENDERS.includes(b.gender) ? b.gender : 'iba',
+    avatar: str(b.avatar, 5_000_000),
+    bio: str(b.bio, 500),
+    location: str(b.location, 120),
+  };
+  let created;
+  try {
+    created = await sb('POST', 'konekta_users', { body: row, prefer: 'return=representation' });
+  } catch (err) {
+    if (err.status === 409) return res.status(409).json({ ok: false, error: 'May account na gamit ang email o numerong ito. Mag-log in na lang.' });
+    throw err;
+  }
+  const saved = created[0];
+  res.json({ ok: true, user: rowToUser(saved, true), token: sessionFor(saved) });
+}));
+
+app.post('/api/auth/login', needDb, wrap(async (req, res) => {
+  const id = parseIdentifier(req.body?.identifier);
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  const bad = { ok: false, error: 'Maling email/numero o password. Pakisuri muli.' };
+  if (!id || !password || password.length > 200) return res.status(401).json(bad);
+
+  const fails = loginFails.get(id.key);
+  if (fails && fails.resetAt > Date.now() && fails.count >= 10) {
+    return res.status(429).json({ ok: false, error: 'Sobra na ang maling tangka. Subukan ulit pagkatapos ng 15 minuto.' });
+  }
+  const row = await findUserByKey(id.key);
+  const ok = row ? await checkPassword(password, row.password_hash) : false;
+  if (!ok) {
+    const cur = fails && fails.resetAt > Date.now() ? fails : { count: 0, resetAt: Date.now() + 15 * 60 * 1000 };
+    cur.count += 1;
+    loginFails.set(id.key, cur);
+    return res.status(401).json(bad);
+  }
+  loginFails.delete(id.key);
+  res.json({ ok: true, user: rowToUser(row, true), token: sessionFor(row) });
+}));
+
+app.post('/api/auth/reset', needDb, wrap(async (req, res) => {
+  const proof = readPayload(req.body?.proof);
+  const password = typeof req.body?.newPassword === 'string' ? req.body.newPassword : '';
+  if (!proof || proof.t !== 'proof' || proof.p !== 'reset') {
+    return res.status(400).json({ ok: false, error: 'Hindi pa na-verify ang PIN. Humingi ng bagong PIN.' });
+  }
+  if (password.length < 6 || password.length > 200) {
+    return res.status(400).json({ ok: false, error: 'Ang password ay dapat 6 hanggang 200 character.' });
+  }
+  const row = await findUserByKey(proof.k);
+  if (!row) return res.status(404).json({ ok: false, error: 'Walang account na gumagamit ng email o numerong ito.' });
+  const updated = await sb('PATCH', 'konekta_users', {
+    query: `?id=eq.${enc(row.id)}`,
+    body: { password_hash: await hashPassword(password), updated_at: new Date().toISOString() },
+    prefer: 'return=representation',
+  });
+  loginFails.delete(proof.k);
+  res.json({ ok: true, user: rowToUser(updated[0], true), token: sessionFor(updated[0]) });
+}));
+
+// Directory of users (search). Other people's email/phone are masked.
+app.get('/api/users', needDb, needAuth, wrap(async (req, res) => {
+  const since = typeof req.query.since === 'string' ? req.query.since : '';
+  const filter = since ? `&updated_at=gte.${enc(since)}` : '';
+  const rows = await sb('GET', 'konekta_users', { query: `?select=*&order=updated_at.asc&limit=1000${filter}` });
+  const cursor = rows.length ? rows[rows.length - 1].updated_at : since || null;
+  res.json({ ok: true, users: rows.map((r) => rowToUser(r, r.id === req.uid)), cursor });
+}));
+
+app.put('/api/me', needDb, needAuth, wrap(async (req, res) => {
+  const b = req.body || {};
+  const patch = { updated_at: new Date().toISOString() };
+  if (b.firstName !== undefined) { const v = str(b.firstName, 50); if (!v) return res.status(400).json({ ok: false, error: 'Kulang ang pangalan.' }); patch.first_name = v; }
+  if (b.lastName !== undefined) { const v = str(b.lastName, 50); if (!v) return res.status(400).json({ ok: false, error: 'Kulang ang apelyido.' }); patch.last_name = v; }
+  if (b.gender !== undefined && GENDERS.includes(b.gender)) patch.gender = b.gender;
+  if (b.avatar !== undefined) patch.avatar = str(b.avatar, 5_000_000);
+  if (b.coverPhoto !== undefined) patch.cover_photo = str(b.coverPhoto, 5_000_000);
+  if (b.bio !== undefined) patch.bio = str(b.bio, 500);
+  if (b.birthday !== undefined) patch.birthday = str(b.birthday, 30) || null;
+  if (b.location !== undefined) patch.location = str(b.location, 120);
+  if (b.work !== undefined) patch.work = str(b.work, 120);
+  const updated = await sb('PATCH', 'konekta_users', { query: `?id=eq.${enc(req.uid)}`, body: patch, prefer: 'return=representation' });
+  if (!updated || !updated[0]) return res.status(404).json({ ok: false, error: 'Hindi nahanap ang account.' });
+  res.json({ ok: true, user: rowToUser(updated[0], true) });
+}));
+
+app.get('/api/friends', needDb, needAuth, wrap(async (req, res) => {
+  const me = enc(req.uid);
+  const [friends, sent, received] = await Promise.all([
+    sb('GET', 'konekta_friends', { query: `?user_id=eq.${me}&select=friend_id` }),
+    sb('GET', 'konekta_friend_requests', { query: `?from_id=eq.${me}&select=to_id` }),
+    sb('GET', 'konekta_friend_requests', { query: `?to_id=eq.${me}&select=from_id` }),
+  ]);
+  res.json({
+    ok: true,
+    friends: friends.map((r) => r.friend_id),
+    sent: sent.map((r) => r.to_id),
+    received: received.map((r) => r.from_id),
+  });
+}));
+
+const pairFilter = (a, b, c1, c2) =>
+  `?or=(and(${c1}.eq.${a},${c2}.eq.${b}),and(${c1}.eq.${b},${c2}.eq.${a}))`;
+
+app.post('/api/friends/:action', needDb, needAuth, wrap(async (req, res) => {
+  const me = req.uid;
+  const action = req.params.action;
+  const other = req.body?.to || req.body?.from || req.body?.target;
+  if (!['request', 'cancel', 'accept', 'unfriend'].includes(action)) return res.status(404).json({ ok: false, error: 'Hindi alam na aksyon.' });
+  if (typeof other !== 'string' || !SAFE_ID.test(other) || other === me) return res.status(400).json({ ok: false, error: 'Maling user.' });
+
+  if (action === 'request') {
+    const target = await sb('GET', 'konekta_users', { query: `?id=eq.${enc(other)}&select=id&limit=1` });
+    if (!target.length) return res.status(404).json({ ok: false, error: 'Hindi nahanap ang user.' });
+    const already = await sb('GET', 'konekta_friends', { query: `?user_id=eq.${enc(me)}&friend_id=eq.${enc(other)}&select=user_id&limit=1` });
+    if (!already.length) {
+      await sb('POST', 'konekta_friend_requests', {
+        query: '?on_conflict=from_id,to_id',
+        body: { from_id: me, to_id: other },
+        prefer: 'resolution=ignore-duplicates,return=minimal',
+      });
+    }
+  } else if (action === 'cancel') {
+    // also lets the receiver decline a request
+    await sb('DELETE', 'konekta_friend_requests', { query: pairFilter(me, other, 'from_id', 'to_id'), prefer: 'return=minimal' });
+  } else if (action === 'accept') {
+    const pending = await sb('GET', 'konekta_friend_requests', { query: `?from_id=eq.${enc(other)}&to_id=eq.${enc(me)}&select=from_id&limit=1` });
+    if (!pending.length) return res.status(404).json({ ok: false, error: 'Wala nang friend request.' });
+    await sb('POST', 'konekta_friends', {
+      query: '?on_conflict=user_id,friend_id',
+      body: [{ user_id: me, friend_id: other }, { user_id: other, friend_id: me }],
+      prefer: 'resolution=ignore-duplicates,return=minimal',
+    });
+    await sb('DELETE', 'konekta_friend_requests', { query: pairFilter(me, other, 'from_id', 'to_id'), prefer: 'return=minimal' });
+  } else if (action === 'unfriend') {
+    await sb('DELETE', 'konekta_friends', { query: pairFilter(me, other, 'user_id', 'friend_id'), prefer: 'return=minimal' });
+  }
+  res.json({ ok: true });
+}));
 
 // Serve static assets from dist
 app.use(express.static(path.join(__dirname, 'dist')));

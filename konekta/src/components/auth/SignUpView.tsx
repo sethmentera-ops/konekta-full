@@ -49,7 +49,7 @@ export const SignUpView: React.FC = () => {
     }
 
     setIsLoading(true);
-    OtpService.send(emailOrPhone.trim()).then((res) => {
+    OtpService.send(emailOrPhone.trim(), 'signup').then((res) => {
       setIsLoading(false);
       if (!res.ok) {
         setErrorMessage(res.error || 'Hindi naipadala ang PIN.');
@@ -64,7 +64,7 @@ export const SignUpView: React.FC = () => {
   const handleResend = async () => {
     if (cooldown > 0) return;
     setErrorMessage('');
-    const res = await OtpService.send(emailOrPhone.trim());
+    const res = await OtpService.send(emailOrPhone.trim(), 'signup');
     if (!res.ok) {
       setErrorMessage(res.error || 'Hindi naipadala ang PIN.');
       return;
@@ -80,13 +80,13 @@ export const SignUpView: React.FC = () => {
       return;
     }
     setIsLoading(true);
-    const res = await OtpService.verify(emailOrPhone.trim(), pin);
-    if (!res.ok) {
+    const res = await OtpService.verify(emailOrPhone.trim(), pin, 'signup');
+    if (!res.ok || !res.proof) {
       setIsLoading(false);
       setErrorMessage(res.error || 'Mali ang PIN.');
       return;
     }
-    const result = signup({
+    const result = await signup({
       firstName: firstName.trim(),
       lastName: lastName.trim(),
       emailOrPhone: emailOrPhone.trim(),
@@ -96,7 +96,7 @@ export const SignUpView: React.FC = () => {
       coverPhoto: '',
       bio: 'Bago sa Konekta! 👋',
       location: 'Pilipinas'
-    });
+    }, res.proof);
     setIsLoading(false);
     if (!result.success) {
       setErrorMessage(result.error || 'Failed to register.');
@@ -159,10 +159,10 @@ export const SignUpView: React.FC = () => {
               />
               <button
                 type="submit"
-                disabled={isLoading || pin.length !== 6}
-                className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-sm font-bold rounded-xl shadow-sm transition-all"
+                disabled={isLoading}
+                className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-bold rounded-xl shadow-sm transition-all"
               >
-                {isLoading ? '...' : 'I-verify at Gumawa ng Account'}
+                {isLoading ? 'Sandali...' : 'I-verify at Gumawa ng Account'}
               </button>
               <div className="flex items-center justify-between text-xs font-semibold">
                 <button

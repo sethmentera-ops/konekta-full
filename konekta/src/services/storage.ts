@@ -34,13 +34,11 @@ const STORAGE_KEYS = {
 const DUMMY_IDS = ['user_juan', 'user_maria', 'user_carlo', 'user_konekta_team', 'user_ana'];
 const DUMMY_NAMES = ['juan', 'maria', 'carlo', 'konekta official', 'ana gomez', 'konekta'];
 
+// Only the old built-in demo accounts (by id) are removed. Real people named
+// Juan, Maria, Ana, etc. must never be treated as dummy data.
 function isDummyUser(u: any): boolean {
   if (!u) return false;
-  if (typeof u.id === 'string' && DUMMY_IDS.includes(u.id)) return true;
-  const fullName = `${u.firstName || ''} ${u.lastName || ''}`.trim().toLowerCase();
-  const fName = (u.firstName || '').trim().toLowerCase();
-  if (DUMMY_NAMES.some(n => fullName.includes(n) || fName === n)) return true;
-  return false;
+  return typeof u.id === 'string' && DUMMY_IDS.includes(u.id);
 }
 
 // Automatically purge legacy dummy data and AI avatars from localStorage on load
@@ -685,6 +683,22 @@ export const StorageService = {
     const defaults: Record<string, string[]> = {};
     localStorage.setItem(STORAGE_KEYS.FRIENDS, JSON.stringify(defaults));
     return defaults;
+  },
+
+  setFriendsMap(map: Record<string, string[]>): void {
+    try {
+      localStorage.setItem(STORAGE_KEYS.FRIENDS, JSON.stringify(map));
+    } catch (e) {
+      console.warn(e);
+    }
+  },
+
+  setSentRequestsMap(map: Record<string, string[]>): void {
+    try {
+      localStorage.setItem(STORAGE_KEYS.FRIEND_REQUESTS, JSON.stringify(map));
+    } catch (e) {
+      console.warn(e);
+    }
   },
 
   getFriends(userId: string): string[] {
